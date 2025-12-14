@@ -1,5 +1,8 @@
 # Kahoot bot generator & pin scanner
 
+> [!WARNING]
+> *This project is intended for educational purposes only.*
+
 For more information on how to use the generated binaries, see [GUIDE.md](https://github.com/snej55/kahoot/blob/main/GUIDE.md).
 
 ---
