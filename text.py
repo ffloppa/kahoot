@@ -9,9 +9,13 @@
 # You can find other kahoot related scripts at: https://github.com/snej55/kahoot 
 
 import asyncio
+import json
 import threading
 import random
 import time
+import re
+
+import requests
 from kahoot import KahootClient
 from kahoot.packets.impl.respond import RespondPacket
 from kahoot.packets.server.game_over import GameOverPacket
@@ -20,26 +24,70 @@ from kahoot.packets.server.question_end import QuestionEndPacket
 from kahoot.packets.server.question_ready import QuestionReadyPacket
 from kahoot.packets.server.question_start import QuestionStartPacket
 
-async def question_start(packet: QuestionStartPacket):
-    print(f"Question started: {packet}")
-
-async def main(username, pin):
+async def main(username, pin, shared_state):
     client = KahootClient()
-
+    
     async def game_start(packet: GameStartPacket):
         print(f"Game started: {packet}")
 
     async def game_over(packet: GameOverPacket):
         print(f"Game over: {packet}")
+        
+    async def findAnswer(question, max_number):
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer ",
+                "Content-Type": "application/json"
+            },
+            data=json.dumps({
+                "model":
+                "liquid/lfm-2.5-1.2b-instruct:free",
+                "messages": [{
+                    "role":
+                    "system",
+                    "content":
+                    "Type only the number of the correct answer. Example: What is the color of the sky? 1. Red 2. Blue 3. Green 4. Yellow. Answer: 2, What is the color of the grass? 1. Red 2. Blue 3. Green 4. Yellow. Answer: 3"
+                }, {
+                    "role": "user",
+                    "content": f"You have {max_number} options, " + str(question)
+                }]
+            }))
+        if response.status_code != 200:
+            print("Error getting answer:", response.text)
+            return random.randint(1, max_number)
+        match = re.search(r'\d', response.json()["choices"][0]["message"]["content"])
+        shared_state["lastAnswer"] = int(match.group()) if match else random.randint(1, max_number)
+        print(response.json()["choices"][0]["message"]["content"])
+        return shared_state["lastAnswer"]
 
-    # randomly answer the question
     async def question_start(packet: QuestionStartPacket):
         print(f"Question started: {packet}")
         question_number: int = packet.game_block_index
-        time.sleep(random.random() * 6)
-        await client.send_packet(RespondPacket(client.game_pin, random.randint(0, packet.number_of_choices), question_number))
+        with shared_state["lock"]:
+            if shared_state["choseRandom"]:
+                await client.send_packet(RespondPacket(client.game_pin, random.randint(1, packet.number_of_choices), question_number))
+                return
+            if shared_state["lastAnswer"] == -1:
+                mode = input("Choose answer mode (1 - random/2 - AI): ").strip().lower()
+                if mode == "1":
+                    answer = random.randint(1, packet.number_of_choices)
+                    shared_state["choseRandom"] = True
+                    await client.send_packet(RespondPacket(client.game_pin, answer, question_number))
+                    return
+                else:
+                    shared_state["lastQuestion"] = str(input("Write what you see: "))
+                    print("Preparing answer...")
+                    answer = await findAnswer(shared_state["lastQuestion"], packet.number_of_choices)
+                shared_state["lastAnswer"] = answer
+
+            await client.send_packet(RespondPacket(client.game_pin, shared_state["lastAnswer"], question_number))
 
     async def question_end(packet: QuestionEndPacket):
+        with shared_state["lock"]:
+            shared_state["lastQuestion"] = ""
+            shared_state["lastAnswer"] = -1
+            shared_state["choseRandom"] = False
         print(f"Question ended: {packet}")
 
     async def question_ready(packet: QuestionReadyPacket):
@@ -51,11 +99,20 @@ async def main(username, pin):
     client.on("question_end", question_end)
     client.on("question_ready", question_ready)
     await client.join_game(game_pin=pin, username=username)
+    
+    while True:
+        await asyncio.sleep(1)
 
-def join(username, pin):
-    asyncio.run(main(username, pin))
+def join(username, pin, shared_state):
+    asyncio.run(main(username, pin, shared_state))
 
 if __name__ == "__main__":
+    shared_state = {
+    'lastAnswer': -1,
+    'lastQuestion': '',
+    'choseRandom': False,
+    'lock': threading.Lock()
+    }
     print("#######################################")
     print("# Welcome to the Kahoot bot generator #")
     print("#######################################\n")
@@ -80,7 +137,7 @@ if __name__ == "__main__":
 
         # create bots
         for word in lyrics:
-            t = threading.Thread(target=join, args=(word, pin))
+            t = threading.Thread(target=join, args=(word, pin, shared_state))
             time.sleep(0.3)
             t.start()
             threads.append(t)
